@@ -3,6 +3,7 @@ import config from './config/env.js';
 import {connect} from './config/database.js';
 
 async function start(){
+  if (!config.jwtSecret) throw new Error('JWT_SECRET is required');
   await connect();
   app.listen(config.port, ()=>console.log(`Server running on ${config.port}`));
 }
