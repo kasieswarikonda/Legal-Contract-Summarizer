@@ -14,3 +14,8 @@ export async function uploadContract(file) {
     });
     return response.data;
 }
+
+export async function getContracts() {
+    const response = await api.get('/contracts');
+    return response.data;
+}

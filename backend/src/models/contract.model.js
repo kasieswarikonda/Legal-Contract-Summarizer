@@ -39,6 +39,10 @@ const contractSchema = new mongoose.Schema({
     extractedText: {
         type: String,
         default: null
+    },
+    extractionError: {
+        type: String,
+        default: null
     }
 }, { timestamps: true });
 

@@ -3,6 +3,10 @@ import path from 'path';
 import mongoose from 'mongoose';
 
 import { Contract } from '../models/contract.model.js';
+import {
+    extractTextFromFile,
+    ExtractionError
+} from '../services/documentExtraction.service.js';
 
 export async function uploadContract(req, res) {
     try {
@@ -39,7 +43,7 @@ export async function uploadContract(req, res) {
             });
         }
 
-        const contract = await Contract.create({
+        let contract = await Contract.create({
             user: req.user.userId,
             originalFileName: req.file.originalname,
             storedFileName: req.file.filename,
@@ -51,15 +55,57 @@ export async function uploadContract(req, res) {
             extractedText: null
         });
 
+        // Mark as processing before attempting extraction.
+        contract.processingStatus = 'processing';
+        await contract.save();
+
+        let extractedText;
+
+        try {
+            extractedText = await extractTextFromFile(req.file.path, fileType);
+        } catch (extractionError) {
+            // Keep the Contract record, mark it failed, and surface a safe message.
+            contract.processingStatus = 'failed';
+            contract.extractionError = extractionError.message || null;
+            await contract.save().catch(() => {});
+
+            const message =
+                extractionError instanceof ExtractionError
+                    ? extractionError.message
+                    : 'Text extraction failed. The file may be corrupted or unsupported.';
+
+            console.error('Contract text extraction failed:', extractionError.message);
+
+            return res.status(200).json({
+                success: true,
+                message: 'Contract uploaded, but text extraction failed.',
+                contract: {
+                    id: contract._id,
+                    originalFileName: contract.originalFileName,
+                    fileType: contract.fileType,
+                    fileSize: contract.fileSize,
+                    processingStatus: contract.processingStatus,
+                    extractionError: message,
+                    createdAt: contract.createdAt
+                }
+            });
+        }
+
+        // Extraction succeeded: persist the text and mark completed.
+        contract.extractedText = extractedText;
+        contract.processingStatus = 'completed';
+        await contract.save();
+
         return res.status(201).json({
             success: true,
-            message: 'Contract uploaded successfully.',
+            message: 'Contract uploaded and processed successfully.',
             contract: {
                 id: contract._id,
                 originalFileName: contract.originalFileName,
                 fileType: contract.fileType,
                 fileSize: contract.fileSize,
                 processingStatus: contract.processingStatus,
+                extractionError: contract.extractionError || null,
                 createdAt: contract.createdAt
             }
         });
@@ -86,9 +132,10 @@ export async function getContracts(req, res) {
             });
         }
 
-        const contracts = await Contract.find({
-            user: req.user.userId
-        }).sort({ createdAt: -1 });
+        const contracts = await Contract.find(
+            { user: req.user.userId },
+            '-filePath'
+        ).sort({ createdAt: -1 });
 
         return res.status(200).json({
             success: true,
@@ -122,10 +169,10 @@ export async function getContractById(req, res) {
             });
         }
 
-        const contract = await Contract.findOne({
-            _id: id,
-            user: req.user.userId
-        });
+        const contract = await Contract.findOne(
+            { _id: id, user: req.user.userId },
+            '-filePath'
+        );
 
         if (!contract) {
             return res.status(404).json({
