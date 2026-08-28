@@ -64,15 +64,16 @@ export async function uploadContract(req, res) {
         try {
             extractedText = await extractTextFromFile(req.file.path, fileType);
         } catch (extractionError) {
-            // Keep the Contract record, mark it failed, and surface a safe message.
-            contract.processingStatus = 'failed';
-            contract.extractionError = extractionError.message || null;
-            await contract.save().catch(() => {});
-
             const message =
                 extractionError instanceof ExtractionError
                     ? extractionError.message
                     : 'Text extraction failed. The file may be corrupted or unsupported.';
+
+            // Keep the Contract record, mark it failed, and store only the
+            // safe user-facing message (never raw error/stack internals).
+            contract.processingStatus = 'failed';
+            contract.extractionError = message;
+            await contract.save().catch(() => {});
 
             console.error('Contract text extraction failed:', extractionError.message);
 
@@ -134,7 +135,7 @@ export async function getContracts(req, res) {
 
         const contracts = await Contract.find(
             { user: req.user.userId },
-            '-filePath'
+            '-filePath -storedFileName'
         ).sort({ createdAt: -1 });
 
         return res.status(200).json({
@@ -171,7 +172,7 @@ export async function getContractById(req, res) {
 
         const contract = await Contract.findOne(
             { _id: id, user: req.user.userId },
-            '-filePath'
+            '-filePath -storedFileName'
         );
 
         if (!contract) {
