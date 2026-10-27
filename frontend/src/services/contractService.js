@@ -25,3 +25,13 @@ export async function getContractById(id) {
     const response = await api.get(`/contracts/${id}`);
     return response.data;
 }
+
+export async function deleteContract(id) {
+    const response = await api.delete(`/contracts/${id}`);
+    return response.data;
+}
+
+export async function pinContract(id) {
+    const response = await api.patch(`/contracts/${id}/pin`);
+    return response.data;
+}

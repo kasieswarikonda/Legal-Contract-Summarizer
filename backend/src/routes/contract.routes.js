@@ -8,7 +8,9 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import {
     uploadContract,
     getContracts,
-    getContractById
+    getContractById,
+    pinContract,
+    deleteContract
 } from '../controllers/contract.controller.js';
 
 const router = express.Router();
@@ -105,6 +107,20 @@ router.get(
     '/:id',
     requireAuth,
     getContractById
+);
+
+// Pin / unpin a contract
+router.patch(
+    '/:id/pin',
+    requireAuth,
+    pinContract
+);
+
+// Delete a contract
+router.delete(
+    '/:id',
+    requireAuth,
+    deleteContract
 );
 
 export default router;

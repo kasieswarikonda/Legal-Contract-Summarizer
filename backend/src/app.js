@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import config from './config/env.js';
 import authRoutes from './routes/auth.routes.js';
 import contractRoutes from './routes/contract.routes.js';
+import analysisRoutes from './routes/analysis.routes.js';
 import { errorHandler } from './middleware/error.middleware.js';
 
 const app = express();
@@ -15,6 +16,7 @@ app.use(cookieParser());
 
 app.use('/api/auth', authRoutes);
 app.use('/api/contracts', contractRoutes);
+app.use('/api/analysis', analysisRoutes);
 
 app.use(errorHandler);
 

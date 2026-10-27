@@ -1,459 +1,226 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import useAuth from '../../hooks/useAuth';
-import {
-  uploadContract,
-  getContracts,
-  getContractById,
-} from '../../services/contractService';
+import { getContracts, deleteContract, pinContract } from '../../services/contractService';
+import { triggerAnalysis, getAnalysis, getReport } from '../../services/analysisService';
+import Sidebar from '../../components/common/Sidebar';
+import UploadPanel from '../../components/analysis/UploadPanel';
+import AnalysisResult from '../../components/analysis/AnalysisResult';
+import QAPanel from '../../components/analysis/QAPanel';
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB, matches backend limit
-
-function statusLabel(status) {
-  switch (status) {
-    case 'pending':
-      return 'Pending';
-    case 'processing':
-      return 'Processing';
-    case 'completed':
-      return 'Completed';
-    case 'failed':
-      return 'Failed';
-    default:
-      return status;
-  }
-}
-
-function fileSizeLabel(bytes) {
-  if (!bytes && bytes !== 0) return '\u2014';
-  if (bytes < 1024) return `${bytes} B`;
-  const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(1)} KB`;
-  const mb = kb / 1024;
-  return `${mb.toFixed(2)} MB`;
-}
-
-function formatDate(isoDate) {
-  if (!isoDate) return '\u2014';
-  const date = new Date(isoDate);
-  if (Number.isNaN(date.getTime())) return '\u2014';
-  const datePart = date.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  });
-  const timePart = date.toLocaleTimeString(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-  return `${datePart}, ${timePart}`;
-}
-
-function isSupportedFile(file) {
-  if (!file) return false;
-  return /\.(pdf|docx)$/i.test(file.name);
-}
-
-function fileTypeLabel(file) {
-  if (!file) return '\u2014';
-  return /\.pdf$/i.test(file.name) ? 'PDF' : 'DOCX';
-}
-
-function getErrorMessage(error, fallback) {
-  return (
-    error?.response?.data?.message ||
-    error?.message ||
-    fallback
-  );
+function downloadReport(report) {
+  const lines = [
+    'LEGAL CONTRACT ANALYSIS REPORT',
+    `Generated: ${new Date(report.generatedAt).toLocaleString()}`,
+    '',
+    `FILE: ${report.contract.fileName} (${report.contract.fileType?.toUpperCase()})`,
+    '',
+    '━━━ SUMMARY ━━━',
+    report.summary,
+    '',
+    `━━━ RISK SCORE: ${report.riskScore}/100 ━━━`,
+    '',
+    '━━━ DETECTED RISKS ━━━',
+    ...(report.risks || []).map(r => `[${r.level?.toUpperCase()}] ${r.clause}\n  ${r.explanation}`),
+    '',
+    '━━━ IMPORTANT CLAUSES ━━━',
+    ...(report.importantClauses || []).map(c => `• ${c.title}\n  ${c.explanation}`),
+    '',
+    '━━━ Q&A HISTORY ━━━',
+    ...(report.qaHistory || []).map(q => `Q: ${q.question}\nA: ${q.answer}`),
+  ];
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${report.contract.fileName}-analysis.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export default function Dashboard() {
   const { user } = useAuth();
-  const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [message, setMessage] = useState(null);
-  const [isError, setIsError] = useState(false);
-
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [contracts, setContracts] = useState([]);
-  const [loadingContracts, setLoadingContracts] = useState(true);
-  const [contractsError, setContractsError] = useState(null);
-
-  const [selectedContract, setSelectedContract] = useState(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState(null);
+  const [activeContract, setActiveContract] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
+  const [viewStatus, setViewStatus] = useState('welcome'); // welcome | analyzing | done | error
+  const [errorMsg, setErrorMsg] = useState('');
+  const [reportLoading, setReportLoading] = useState(false);
 
   const loadContracts = useCallback(async () => {
-    setLoadingContracts(true);
-    setContractsError(null);
     try {
-      const response = await getContracts();
-      if (response && response.success) {
-        setContracts(response.contracts || []);
-      } else {
-        setContractsError(
-          response?.message || 'Failed to load your contracts.'
-        );
-      }
-    } catch (error) {
-      if (error?.response?.status === 401) {
-        setContractsError(
-          'Your session has expired. Please log in again and retry.'
-        );
-      } else {
-        setContractsError(
-          getErrorMessage(error, 'Failed to load your contracts. Please try again.')
-        );
-      }
-    } finally {
-      setLoadingContracts(false);
-    }
+      const res = await getContracts();
+      if (res?.success) setContracts(res.contracts || []);
+    } catch { /* silent */ }
   }, []);
 
+  useEffect(() => { loadContracts(); }, [loadContracts]);
+
+  // Listen for Q&A answers to reload analysis
   useEffect(() => {
-    loadContracts();
-  }, [loadContracts]);
+    async function onQaAnswered() {
+      if (!activeContract) return;
+      try {
+        const res = await getAnalysis(activeContract._id);
+        if (res.success) setAnalysis(res.analysis);
+      } catch { /* silent */ }
+    }
+    window.addEventListener('qa-answered', onQaAnswered);
+    return () => window.removeEventListener('qa-answered', onQaAnswered);
+  }, [activeContract]);
 
-  const handleFileChange = (e) => {
-    const selected = e.target.files && e.target.files[0];
-    if (!selected) return;
+  async function openContract(contract) {
+    setActiveContract(contract);
+    setAnalysis(null);
+    setErrorMsg('');
 
-    if (!isSupportedFile(selected)) {
-      setFile(null);
-      setMessage('Invalid file type. Please select a PDF (.pdf) or Word (.docx) file.');
-      setIsError(true);
-      e.target.value = '';
+    if (contract.processingStatus !== 'completed') {
+      setViewStatus('error');
+      setErrorMsg('This contract failed to process. Please upload it again.');
       return;
     }
 
-    if (selected.size > MAX_FILE_SIZE) {
-      setFile(null);
-      setMessage('File is too large. The maximum allowed size is 10 MB.');
-      setIsError(true);
-      e.target.value = '';
-      return;
-    }
-
-    setFile(selected);
-    setMessage(null);
-    setIsError(false);
-    setUploadProgress(0);
-  };
-
-  const clearFile = () => {
-    setFile(null);
-    const input = document.getElementById('contract-file-input');
-    if (input) input.value = '';
-  };
-
-  const handleUpload = async (e) => {
-    e.preventDefault();
-    if (!file) {
-      setMessage('Please select a file first.');
-      setIsError(true);
-      return;
-    }
-
-    setUploading(true);
-    setUploadProgress(0);
-    setMessage(null);
-    setIsError(false);
-
+    // Check for existing analysis
     try {
-      const response = await uploadContract(file, (event) => {
-        if (event && event.total) {
-          setUploadProgress(Math.round((event.loaded * 100) / event.total));
-        }
-      });
-
-      if (response && response.success) {
-        if (response.contract && response.contract.processingStatus === 'failed') {
-          setMessage(
-            response.contract.extractionError ||
-              'Contract uploaded, but text extraction failed.'
-          );
-          setIsError(true);
-        } else {
-          setMessage('Contract uploaded and processed successfully.');
-        }
-        clearFile();
-        loadContracts();
-      } else {
-        setMessage(response?.message || 'Upload failed.');
-        setIsError(true);
+      const res = await getAnalysis(contract._id);
+      if (res.success && res.analysis?.status === 'completed') {
+        setAnalysis(res.analysis);
+        setViewStatus('done');
+        return;
       }
-    } catch (error) {
-      if (error?.response?.status === 401) {
-        setMessage('Your session has expired. Please log in again.');
-      } else {
-        setMessage(getErrorMessage(error, 'An error occurred during upload.'));
-      }
-      setIsError(true);
-    } finally {
-      setUploading(false);
-    }
-  };
+    } catch { /* no existing */ }
 
-  const handleCloseDetail = useCallback(() => {
-    setSelectedContract(null);
-    setDetailLoading(false);
-    setDetailError(null);
-  }, []);
-
-  useEffect(() => {
-    function handleKeyDown(e) {
-      if (e.key === 'Escape') handleCloseDetail();
-    }
-    if (selectedContract) window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedContract, handleCloseDetail]);
-
-  const handleViewContract = async (contract) => {
-    setSelectedContract(contract);
-    setDetailLoading(true);
-    setDetailError(null);
+    // Trigger new analysis
+    setViewStatus('analyzing');
     try {
-      const response = await getContractById(contract._id || contract.id);
-      if (response && response.success) {
-        setSelectedContract(response.contract);
-      } else {
-        setDetailError(response?.message || 'Could not load contract details.');
-      }
-    } catch (error) {
-      if (error?.response?.status === 401) {
-        setDetailError('Your session has expired. Please log in again.');
-      } else {
-        setDetailError(
-          getErrorMessage(error, 'Could not load contract details. Please try again.')
-        );
-      }
-    } finally {
-      setDetailLoading(false);
+      const res = await triggerAnalysis(contract._id);
+      if (res.success) { setAnalysis(res.analysis); setViewStatus('done'); }
+      else { setErrorMsg(res.message || 'Analysis failed.'); setViewStatus('error'); }
+    } catch (err) {
+      setErrorMsg(err?.response?.data?.message || 'AI analysis failed.');
+      setViewStatus('error');
     }
-  };
+  }
+
+  async function handleReanalyze() {
+    if (!activeContract) return;
+    setViewStatus('analyzing'); setAnalysis(null); setErrorMsg('');
+    try {
+      const res = await triggerAnalysis(activeContract._id);
+      if (res.success) { setAnalysis(res.analysis); setViewStatus('done'); }
+      else { setErrorMsg(res.message || 'Analysis failed.'); setViewStatus('error'); }
+    } catch (err) {
+      setErrorMsg(err?.response?.data?.message || 'AI analysis failed.');
+      setViewStatus('error');
+    }
+  }
+
+  async function handleDownloadReport() {
+    if (!activeContract) return;
+    setReportLoading(true);
+    try {
+      const res = await getReport(activeContract._id);
+      if (res.success) downloadReport(res.report);
+    } catch (err) {
+      alert(err?.response?.data?.message || 'Failed to generate report.');
+    } finally { setReportLoading(false); }
+  }
+
+  function handleUploaded(contract) {
+    loadContracts().then(() => {
+      // Auto-open the newly uploaded contract for analysis
+      openContract({ ...contract, _id: contract.id || contract._id, processingStatus: contract.processingStatus });
+    });
+  }
+
+  async function handlePin(contractId) {
+    try {
+      await pinContract(contractId);
+      await loadContracts();
+    } catch (err) {
+      alert(err?.response?.data?.message || 'Failed to pin contract.');
+    }
+  }
+
+  async function handleDelete(contractId) {
+    try {
+      await deleteContract(contractId);
+      // If the deleted contract is currently open, go back to welcome
+      if (activeContract?._id === contractId) handleNewContract();
+      await loadContracts();
+    } catch (err) {
+      alert(err?.response?.data?.message || 'Failed to delete contract.');
+    }
+  }
+
+  function handleNewContract() {
+    setActiveContract(null);
+    setAnalysis(null);
+    setViewStatus('welcome');
+    setErrorMsg('');
+  }
+
+  const topbarTitle = activeContract ? activeContract.originalFileName : `Welcome, ${user?.name}`;
 
   return (
-    <main className="dashboard">
-      <p className="eyebrow">Your workspace</p>
-      <h1>Welcome, {user.name}</h1>
-      <p className="muted">
-        Upload and manage your legal contracts. Each contract is processed to
-        extract its text.
-      </p>
+    <div className="app-shell">
+      <Sidebar
+        contracts={contracts}
+        activeId={activeContract?._id}
+        onSelect={openContract}
+        onNewContract={handleNewContract}
+        onPin={handlePin}
+        onDelete={handleDelete}
+        collapsed={sidebarCollapsed}
+      />
 
-      <section className="dashboard-section">
-        <h2>Upload a Contract</h2>
-        <p className="muted">
-          Select a PDF or Word (.docx) document (maximum 10 MB) to upload.
-        </p>
-
-        <div className="file-picker">
-          <button
-            type="button"
-            className="file-picker-button"
-            onClick={() => document.getElementById('contract-file-input').click()}
-            disabled={uploading}
-          >
-            Browse File
+      <div className="main-content">
+        {/* Topbar */}
+        <div className="main-topbar">
+          <button className="topbar-toggle" onClick={() => setSidebarCollapsed(c => !c)} title="Toggle sidebar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
-          <input
-            id="contract-file-input"
-            type="file"
-            accept=".pdf,.docx"
-            onChange={handleFileChange}
-            disabled={uploading}
-            className="file-picker-input"
-          />
-          <button
-            type="button"
-            className="btn-submit"
-            onClick={handleUpload}
-            disabled={uploading || !file}
-          >
-            {uploading
-              ? uploadProgress >= 100
-                ? 'Processing document...'
-                : `Uploading ${uploadProgress}%`
-              : 'Upload Contract'}
-          </button>
-        </div>
-
-        {file && (
-          <div className="file-selected">
-            <span className="file-selected-icon">{fileTypeLabel(file)}</span>
-            <span className="file-selected-name">{file.name}</span>
-            <span className="file-selected-meta">{fileSizeLabel(file.size)}</span>
-            <button
-              type="button"
-              className="file-clear"
-              onClick={clearFile}
-              disabled={uploading}
-            >
-              Remove
-            </button>
-          </div>
-        )}
-
-        {uploading && (
-          <div
-            className="upload-progress"
-            role="progressbar"
-            aria-valuenow={uploadProgress}
-            aria-valuemin="0"
-            aria-valuemax="100"
-          >
-            <div
-              className="upload-progress-bar"
-              style={{ width: `${uploadProgress}%` }}
-            />
-          </div>
-        )}
-
-        {message && (
-          <p className={`upload-message ${isError ? 'error' : 'success'}`}>
-            {message}
-          </p>
-        )}
-      </section>
-
-      <section className="dashboard-section">
-        <h2>Contract History</h2>
-        <p className="muted">Every contract uploaded to your workspace.</p>
-
-        {loadingContracts ? (
-          <p className="loading-note">Loading your contracts...</p>
-        ) : contractsError ? (
-          <p className="error-note">{contractsError}</p>
-        ) : contracts.length === 0 ? (
-          <div className="empty-state">
-            <p>No contracts uploaded yet.</p>
-            <p className="muted">
-              Upload a PDF or DOCX document above to see it here.
-            </p>
-          </div>
-        ) : (
-          <div className="contract-table-wrap">
-            <table className="contract-table">
-              <thead>
-                <tr>
-                  <th>File Name</th>
-                  <th>Type</th>
-                  <th>Size</th>
-                  <th>Status</th>
-                  <th>Uploaded</th>
-                  <th className="contract-table-action">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {contracts.map((contract) => (
-                  <tr key={contract._id || contract.id}>
-                    <td>
-                      <span className="contract-file-name">
-                        {contract.originalFileName}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="contract-type">{contract.fileType}</span>
-                    </td>
-                    <td className="contract-size">
-                      {fileSizeLabel(contract.fileSize)}
-                    </td>
-                    <td>
-                      <span
-                        className={`status-badge status-badge-${contract.processingStatus}`}
-                      >
-                        {statusLabel(contract.processingStatus)}
-                      </span>
-                      {contract.processingStatus === 'failed' &&
-                        contract.extractionError && (
-                          <div className="status-error-note">
-                            {contract.extractionError}
-                          </div>
-                        )}
-                    </td>
-                    <td className="contract-date">
-                      {formatDate(contract.createdAt)}
-                    </td>
-                    <td className="contract-table-action">
-                      <button
-                        type="button"
-                        className="btn-view"
-                        onClick={() => handleViewContract(contract)}
-                      >
-                        View
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {selectedContract && (
-        <div className="modal-backdrop" onClick={handleCloseDetail}>
-          <div
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="contract-detail-title"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="modal-header">
-              <h3 id="contract-detail-title">
-                {selectedContract.originalFileName}
-              </h3>
-              <button
-                type="button"
-                className="modal-close"
-                aria-label="Close"
-                onClick={handleCloseDetail}
-              >
-                &times;
+          <span className="topbar-title">{topbarTitle}</span>
+          {viewStatus === 'done' && (
+            <div className="topbar-actions">
+              <button className="topbar-btn" onClick={handleReanalyze}>Re-analyze</button>
+              <button className="topbar-btn primary" onClick={handleDownloadReport} disabled={reportLoading}>
+                {reportLoading ? 'Generating...' : '⬇ Report'}
               </button>
             </div>
-            <div className="modal-meta">
-              <span>
-                Type: {String(selectedContract.fileType || '').toUpperCase()}
-              </span>
-              <span>Size: {fileSizeLabel(selectedContract.fileSize)}</span>
-              <span>
-                Status: {statusLabel(selectedContract.processingStatus)}
-              </span>
-              <span>Uploaded: {formatDate(selectedContract.createdAt)}</span>
-            </div>
-            <div className="modal-body">
-              {detailLoading ? (
-                <p className="muted">Loading extracted text...</p>
-              ) : detailError ? (
-                <p className="form-error">{detailError}</p>
-              ) : selectedContract.processingStatus === 'failed' ? (
-                <p className="muted">
-                  Text extraction failed for this contract.
-                  {selectedContract.extractionError
-                    ? ` Reason: ${selectedContract.extractionError}`
-                    : ''}
-                </p>
-              ) : selectedContract.processingStatus === 'completed' ? (
-                selectedContract.extractedText ? (
-                  <pre className="contract-text">
-                    {selectedContract.extractedText}
-                  </pre>
-                ) : (
-                  <p className="muted">
-                    No extracted text is available for this contract.
-                  </p>
-                )
-              ) : (
-                <p className="muted">
-                  This contract is still processing. Extracted text is not
-                  available yet.
-                </p>
-              )}
-            </div>
-          </div>
+          )}
         </div>
-      )}
-    </main>
+
+        {/* Main area */}
+        {viewStatus === 'welcome' && (
+          <UploadPanel onUploaded={handleUploaded} />
+        )}
+
+        {viewStatus === 'analyzing' && (
+          <div className="analyzing-state">
+            <div className="analyzing-dots">
+              <span /><span /><span />
+            </div>
+            <p className="analyzing-text">Analyzing contract with AI...</p>
+          </div>
+        )}
+
+        {viewStatus === 'error' && (
+          <div className="error-state">
+            <div className="error-state-icon">⚠️</div>
+            <h3>Analysis Failed</h3>
+            <p>{errorMsg}</p>
+            <button className="error-state-btn" onClick={handleNewContract}>Upload New Contract</button>
+          </div>
+        )}
+
+        {viewStatus === 'done' && analysis && (
+          <div className="analysis-view">
+            <AnalysisResult analysis={analysis} />
+            <QAPanel contractId={activeContract._id} />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
